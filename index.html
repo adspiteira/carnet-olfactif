@@ -6,13 +6,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Carnet olfactif" />
-  <meta name="theme-color" content="#F2EBDF" />
+  <meta name="theme-color" content="#FFFFFF" />
   <title>Carnet olfactif</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
-    html, body { margin: 0; padding: 0; background: #F2EBDF; }
+    html, body { margin: 0; padding: 0; background: #FFFFFF; }
   </style>
 </head>
 <body>
@@ -46,20 +46,33 @@ const SCALE = [
 const STORAGE_KEY = "parfum-suivi-v1";
 const TARGET_TESTS = 3;
 
+/* ------------------------------------------------------------------ */
+/*  Style — palette couture épurée                                     */
+/* ------------------------------------------------------------------ */
 const C = {
-  paper: "#F2EBDF",
-  card: "#FBF6EC",
-  ink: "#23201A",
-  muted: "#857A66",
-  line: "#E3D9C6",
-  a: "#C2542E", // Moi
-  b: "#2F6B63", // Ma copine
+  bg: "#FFFFFF",
+  ink: "#1A1A1A",
+  muted: "#8E8E8E",
+  faint: "#B8B8B8",
+  line: "#E6E6E6",
+  a: "#B14E2A", // testeur 1
+  b: "#2E665E", // testeur 2
+  c: "#9C6B28", // testeur 3
+  d: "#586349", // testeur 4
 };
+
+const HEAD = "'Jost', sans-serif";
+const BODY = "'Hanken Grotesk', sans-serif";
+
+/* 4 testeurs renommables */
+const RATER_KEYS = ["a", "b", "c", "d"];
+const RATER_DEFAULTS = { a: "Moi", b: "Ma copine", c: "Ma mère", d: "Autres testeurs" };
+const RATER_COLORS = { a: C.a, b: C.b, c: C.c, d: C.d };
 
 /* ------------------------------------------------------------------ */
 /*  Persistance — localStorage (fonctionne sur site déployé)           */
 /* ------------------------------------------------------------------ */
-const DEFAULT_DATA = { raters: { a: "Moi", b: "Ma copine" }, sessions: [] };
+const DEFAULT_DATA = { raters: { ...RATER_DEFAULTS }, sessions: [] };
 
 const STORAGE_OK = (() => {
   try {
@@ -72,11 +85,29 @@ const STORAGE_OK = (() => {
   }
 })();
 
+/* migration : complète les testeurs manquants + convertit les anciens
+   tests (noteA/noteB) vers le nouveau format notes:{a,b,c,d} */
+function migrate(data) {
+  const raters = { ...RATER_DEFAULTS, ...(data && data.raters ? data.raters : {}) };
+  const rawSessions = data && Array.isArray(data.sessions) ? data.sessions : [];
+  const sessions = rawSessions.map((s) => {
+    if (s.notes) return s;
+    return {
+      id: s.id,
+      perfumeId: s.perfumeId,
+      ts: s.ts,
+      comment: s.comment || "",
+      notes: { a: s.noteA || null, b: s.noteB || null, c: null, d: null },
+    };
+  });
+  return { raters, sessions };
+}
+
 function loadData() {
   if (!STORAGE_OK) return DEFAULT_DATA;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) return migrate(JSON.parse(raw));
   } catch (e) {
     console.error("Lecture impossible", e);
   }
@@ -118,13 +149,17 @@ function App() {
     if (ok) setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1500);
   }
 
-  function addSession(perfumeId, noteA, noteB, comment) {
+  function addSession(perfumeId, notes, comment) {
     const session = {
       id: Date.now().toString(36),
       perfumeId,
       ts: new Date().toISOString(),
-      noteA: noteA || null,
-      noteB: noteB || null,
+      notes: {
+        a: notes.a || null,
+        b: notes.b || null,
+        c: notes.c || null,
+        d: notes.d || null,
+      },
       comment: comment.trim(),
     };
     commit({ ...data, sessions: [session, ...data.sessions] });
@@ -132,8 +167,10 @@ function App() {
   function deleteSession(id) {
     commit({ ...data, sessions: data.sessions.filter((s) => s.id !== id) });
   }
-  function setRaters(a, b) {
-    commit({ ...data, raters: { a: a.trim() || "Moi", b: b.trim() || "Ma copine" } });
+  function setRaters(next) {
+    const clean = {};
+    for (const k of RATER_KEYS) clean[k] = (next[k] || "").trim() || RATER_DEFAULTS[k];
+    commit({ ...data, raters: clean });
   }
   function resetAll() {
     commit({ raters: data.raters, sessions: [] });
@@ -144,13 +181,16 @@ function App() {
     const map = {};
     for (const p of PERFUMES) {
       const ss = data.sessions.filter((s) => s.perfumeId === p.id);
-      const notesA = ss.map((s) => s.noteA).filter(Boolean);
-      const notesB = ss.map((s) => s.noteB).filter(Boolean);
-      const all = [...notesA, ...notesB];
+      const byRater = {};
+      let all = [];
+      for (const k of RATER_KEYS) {
+        const notes = ss.map((s) => s.notes[k]).filter(Boolean);
+        byRater[k] = avg(notes);
+        all = all.concat(notes);
+      }
       map[p.id] = {
         count: ss.length,
-        avgA: avg(notesA),
-        avgB: avg(notesB),
+        byRater,
         combined: avg(all),
         sessions: ss,
       };
@@ -173,101 +213,107 @@ function App() {
   return (
     <Shell>
       {/* En-tête */}
-      <header style={{ padding: "26px 20px 14px" }}>
+      <header style={{ padding: "32px 22px 18px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <h1
               style={{
-                fontFamily: "Fraunces, serif",
-                fontWeight: 600,
-                fontSize: 30,
-                lineHeight: 1.05,
+                fontFamily: HEAD,
+                fontWeight: 400,
+                fontSize: 23,
+                lineHeight: 1.1,
                 color: C.ink,
                 margin: 0,
-                letterSpacing: "-0.02em",
+                textTransform: "uppercase",
+                letterSpacing: "0.18em",
               }}
             >
               Carnet olfactif
             </h1>
-            <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 13, color: C.muted, margin: "6px 0 0" }}>
-              8 échantillons · {totalTests} test{totalTests > 1 ? "s" : ""} · {triedCount}/8 goûtés
+            <p
+              style={{
+                fontFamily: BODY,
+                fontSize: 10.5,
+                color: C.muted,
+                margin: "9px 0 0",
+                textTransform: "uppercase",
+                letterSpacing: "0.12em",
+              }}
+            >
+              8 échantillons — {totalTests} test{totalTests > 1 ? "s" : ""} — {triedCount}/8 goûtés
             </p>
           </div>
           <button onClick={() => setSettings(true)} style={iconBtn}>
             Réglages
           </button>
         </div>
-        {!STORAGE_OK && (
-          <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12, color: C.a, margin: "10px 0 0", lineHeight: 1.45 }}>
-            ⚠ Stockage indisponible sur ce navigateur (mode privé ?) — les notes ne seront pas gardées.
-          </p>
-        )}
-        {STORAGE_OK && saveStatus === "failed" && (
-          <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12, color: C.a, margin: "10px 0 0", lineHeight: 1.45 }}>
-            ⚠ Échec de sauvegarde — rouvre le parfum et ré-enregistre le test.
-          </p>
-        )}
-        {STORAGE_OK && saveStatus === "saved" && (
-          <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12, color: C.b, margin: "10px 0 0" }}>
-            ✓ Enregistré
-          </p>
-        )}
+        {!STORAGE_OK && <Notice color={C.a}>Stockage indisponible sur ce navigateur (mode privé ?) — les notes ne seront pas gardées.</Notice>}
+        {STORAGE_OK && saveStatus === "failed" && <Notice color={C.a}>Échec de sauvegarde — rouvre le parfum et ré-enregistre le test.</Notice>}
+        {STORAGE_OK && saveStatus === "saved" && <Notice color={C.b}>Enregistré</Notice>}
       </header>
 
       {/* Légende */}
       <div
         style={{
           display: "flex",
-          gap: 16,
-          padding: "0 20px 14px",
-          fontFamily: "Hanken Grotesk, sans-serif",
-          fontSize: 12,
+          flexWrap: "wrap",
+          gap: "7px 18px",
+          padding: "0 22px 20px",
+          fontFamily: BODY,
+          fontSize: 10,
           color: C.muted,
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
         }}
       >
-        <span><Dot c={C.a} /> {data.raters.a}</span>
-        <span><Dot c={C.b} /> {data.raters.b}</span>
+        {RATER_KEYS.map((k) => (
+          <span key={k}><Dot c={RATER_COLORS[k]} /> {data.raters[k]}</span>
+        ))}
       </div>
 
       {/* Classement */}
-      <main style={{ padding: "0 14px 40px" }}>
-        {ranked.tested.map((p, i) => (
-          <PerfumeCard
-            key={p.id}
-            perfume={p}
-            stat={stats[p.id]}
-            rank={i + 1}
-            raters={data.raters}
-            isTop={i === 0 && stats[p.id].count >= 2}
-            onTap={() => setActive(p.id)}
-          />
-        ))}
+      <main style={{ padding: "0 22px 48px" }}>
+        <div style={{ borderTop: `1px solid ${C.line}` }}>
+          {ranked.tested.map((p, i) => (
+            <PerfumeRow
+              key={p.id}
+              perfume={p}
+              stat={stats[p.id]}
+              rank={i + 1}
+              raters={data.raters}
+              isTop={i === 0 && stats[p.id].count >= 2}
+              onTap={() => setActive(p.id)}
+            />
+          ))}
+        </div>
 
         {ranked.untested.length > 0 && (
           <p
             style={{
-              fontFamily: "Hanken Grotesk, sans-serif",
-              fontSize: 12,
+              fontFamily: BODY,
+              fontSize: 10,
               textTransform: "uppercase",
-              letterSpacing: "0.08em",
-              color: C.muted,
-              margin: "22px 8px 8px",
+              letterSpacing: "0.14em",
+              color: C.faint,
+              margin: "32px 0 0",
             }}
           >
             Pas encore testés
           </p>
         )}
-        {ranked.untested.map((p) => (
-          <PerfumeCard
-            key={p.id}
-            perfume={p}
-            stat={stats[p.id]}
-            rank={null}
-            raters={data.raters}
-            isTop={false}
-            onTap={() => setActive(p.id)}
-          />
-        ))}
+        <div style={{ borderTop: ranked.untested.length > 0 ? `1px solid ${C.line}` : "none", marginTop: 10 }}>
+          {ranked.untested.map((p) => (
+            <PerfumeRow
+              key={p.id}
+              perfume={p}
+              stat={stats[p.id]}
+              rank={null}
+              raters={data.raters}
+              isTop={false}
+              onTap={() => setActive(p.id)}
+            />
+          ))}
+        </div>
       </main>
 
       {/* Feuille de test */}
@@ -300,16 +346,9 @@ function App() {
 /* ------------------------------------------------------------------ */
 function Shell({ children }) {
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: C.paper,
-        backgroundImage:
-          "radial-gradient(circle at 30% 0%, rgba(255,255,255,0.5), transparent 60%)",
-      }}
-    >
+    <div style={{ minHeight: "100vh", background: C.bg }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Hanken+Grotesk:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500&family=Hanken+Grotesk:wght@400;500;600&display=swap');
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         button { cursor: pointer; border: none; background: none; }
         @keyframes rise { from { transform: translateY(100%); } to { transform: translateY(0); } }
@@ -321,24 +360,44 @@ function Shell({ children }) {
 }
 
 const iconBtn = {
-  fontFamily: "Hanken Grotesk, sans-serif",
-  fontSize: 12,
-  color: C.muted,
-  border: `1px solid ${C.line}`,
-  borderRadius: 999,
-  padding: "6px 12px",
+  fontFamily: BODY,
+  fontSize: 10,
+  color: C.ink,
+  border: `1px solid ${C.ink}`,
+  borderRadius: 0,
+  padding: "8px 14px",
+  textTransform: "uppercase",
+  letterSpacing: "0.12em",
 };
+
+function Notice({ children, color }) {
+  return (
+    <p
+      style={{
+        fontFamily: BODY,
+        fontSize: 11,
+        color: color,
+        margin: "14px 0 0",
+        lineHeight: 1.5,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+      }}
+    >
+      {children}
+    </p>
+  );
+}
 
 function Dot({ c }) {
   return (
     <span
       style={{
         display: "inline-block",
-        width: 8,
-        height: 8,
+        width: 6,
+        height: 6,
         borderRadius: 999,
         background: c,
-        marginRight: 5,
+        marginRight: 6,
         verticalAlign: "middle",
       }}
     />
@@ -346,78 +405,104 @@ function Dot({ c }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Carte parfum                                                       */
+/*  Ligne parfum                                                       */
 /* ------------------------------------------------------------------ */
-function PerfumeCard({ perfume, stat, rank, raters, isTop, onTap }) {
+function PerfumeRow({ perfume, stat, rank, raters, isTop, onTap }) {
   const tested = stat.count > 0;
+  const activeRaters = RATER_KEYS.filter((k) => stat.byRater[k] != null);
   return (
     <button
       onClick={onTap}
       style={{
         width: "100%",
         textAlign: "left",
-        background: C.card,
-        border: `1px solid ${isTop ? C.a : C.line}`,
-        borderRadius: 16,
-        padding: "14px 16px",
-        marginBottom: 10,
+        background: "transparent",
+        borderBottom: `1px solid ${isTop ? C.a : C.line}`,
+        padding: "18px 0",
         display: "block",
-        boxShadow: isTop ? `0 4px 18px rgba(194,84,46,0.13)` : "0 1px 3px rgba(0,0,0,0.03)",
         animation: "fade .4s ease both",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+      {isTop && (
+        <div
+          style={{
+            fontFamily: BODY,
+            fontSize: 9.5,
+            fontWeight: 600,
+            letterSpacing: "0.16em",
+            textTransform: "uppercase",
+            color: C.a,
+            marginBottom: 7,
+          }}
+        >
+          ✦ Coup de cœur
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: "baseline" }}>
         <div style={{ minWidth: 0 }}>
-          {isTop && (
-            <span
-              style={{
-                fontFamily: "Hanken Grotesk, sans-serif",
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                color: C.a,
-              }}
-            >
-              ✦ Coup de cœur
-            </span>
-          )}
           <div
             style={{
-              fontFamily: "Fraunces, serif",
-              fontWeight: 600,
-              fontSize: 19,
+              fontFamily: HEAD,
+              fontWeight: 400,
+              fontSize: 18,
               color: C.ink,
-              letterSpacing: "-0.01em",
-              marginTop: isTop ? 2 : 0,
+              letterSpacing: "0.04em",
             }}
           >
-            {rank && <span style={{ color: C.muted, fontSize: 15 }}>{rank}. </span>}
-            {perfume.name}
+            {rank && <span style={{ color: C.faint, fontSize: 14, marginRight: 2 }}>{String(rank).padStart(2, "0")}</span>} {perfume.name}
           </div>
-          <div style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12.5, color: C.muted, marginTop: 2 }}>
-            {perfume.brand} · {perfume.conc}
+          <div
+            style={{
+              fontFamily: BODY,
+              fontSize: 10.5,
+              color: C.muted,
+              marginTop: 4,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+            }}
+          >
+            {perfume.brand} — {perfume.conc}
           </div>
         </div>
         <div style={{ textAlign: "right", flexShrink: 0 }}>
-          <div style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontSize: 30, color: tested ? C.ink : C.line, lineHeight: 1 }}>
+          <div style={{ fontFamily: HEAD, fontWeight: 300, fontSize: 30, color: tested ? C.ink : C.faint, lineHeight: 1 }}>
             {fmt(stat.combined)}
-            <span style={{ fontSize: 13, color: C.muted }}> /5</span>
+            <span style={{ fontSize: 12, color: C.faint }}> /5</span>
           </div>
-          <div style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 11, color: C.muted, marginTop: 3 }}>
+          <div
+            style={{
+              fontFamily: BODY,
+              fontSize: 9.5,
+              color: C.muted,
+              marginTop: 5,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+            }}
+          >
             {tested ? `${stat.count}/${TARGET_TESTS} test${stat.count > 1 ? "s" : ""}` : "à tester"}
           </div>
         </div>
       </div>
 
-      {tested && (
-        <div style={{ display: "flex", gap: 14, marginTop: 12 }}>
-          <MiniBar label={raters.a} value={stat.avgA} color={C.a} />
-          <MiniBar label={raters.b} value={stat.avgB} color={C.b} />
+      {tested && activeRaters.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px 16px", marginTop: 14 }}>
+          {activeRaters.map((k) => (
+            <MiniBar key={k} label={raters[k]} value={stat.byRater[k]} color={RATER_COLORS[k]} />
+          ))}
         </div>
       )}
       {!tested && (
-        <div style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12.5, color: C.a, marginTop: 10, fontWeight: 500 }}>
+        <div
+          style={{
+            fontFamily: BODY,
+            fontSize: 10,
+            color: C.ink,
+            marginTop: 12,
+            fontWeight: 500,
+            textTransform: "uppercase",
+            letterSpacing: "0.12em",
+          }}
+        >
           Lancer un test →
         </div>
       )}
@@ -428,22 +513,24 @@ function PerfumeCard({ perfume, stat, rank, raters, isTop, onTap }) {
 function MiniBar({ label, value, color }) {
   const pct = value ? (value / 5) * 100 : 0;
   return (
-    <div style={{ flex: 1 }}>
+    <div style={{ flex: "1 1 42%", minWidth: 110 }}>
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
-          fontFamily: "Hanken Grotesk, sans-serif",
-          fontSize: 11,
+          fontFamily: BODY,
+          fontSize: 9.5,
           color: C.muted,
-          marginBottom: 3,
+          marginBottom: 4,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
         }}
       >
-        <span>{label}</span>
-        <span style={{ color: C.ink, fontWeight: 600 }}>{fmt(value)}</span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ color: C.ink, fontWeight: 600, paddingLeft: 6 }}>{fmt(value)}</span>
       </div>
-      <div style={{ height: 5, background: C.line, borderRadius: 999, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 999 }} />
+      <div style={{ height: 3, background: C.line, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: color }} />
       </div>
     </div>
   );
@@ -453,45 +540,81 @@ function MiniBar({ label, value, color }) {
 /*  Feuille de test (bottom sheet)                                     */
 /* ------------------------------------------------------------------ */
 function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
-  const [noteA, setNoteA] = useState(0);
-  const [noteB, setNoteB] = useState(0);
+  const [notes, setNotes] = useState({ a: 0, b: 0, c: 0, d: 0 });
   const [comment, setComment] = useState("");
 
-  const canSave = noteA > 0 || noteB > 0;
+  const canSave = RATER_KEYS.some((k) => notes[k] > 0);
 
+  function setNote(k, v) {
+    setNotes((n) => ({ ...n, [k]: v }));
+  }
   function save() {
     if (!canSave) return;
-    onSave(perfume.id, noteA, noteB, comment);
-    setNoteA(0);
-    setNoteB(0);
+    onSave(perfume.id, notes, comment);
+    setNotes({ a: 0, b: 0, c: 0, d: 0 });
     setComment("");
   }
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ padding: "20px 20px 28px", maxHeight: "88vh", overflowY: "auto" }}>
-        <div style={{ width: 38, height: 4, background: C.line, borderRadius: 999, margin: "0 auto 18px" }} />
+      <div style={{ padding: "16px 22px 30px", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ width: 32, height: 2, background: C.line, margin: "0 auto 22px" }} />
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <h2 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontSize: 23, color: C.ink, margin: 0 }}>
+            <h2
+              style={{
+                fontFamily: HEAD,
+                fontWeight: 400,
+                fontSize: 21,
+                color: C.ink,
+                margin: 0,
+                letterSpacing: "0.05em",
+              }}
+            >
               {perfume.name}
             </h2>
-            <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12.5, color: C.muted, margin: "3px 0 0" }}>
-              {perfume.brand} · {perfume.conc}
+            <p
+              style={{
+                fontFamily: BODY,
+                fontSize: 10.5,
+                color: C.muted,
+                margin: "5px 0 0",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+              }}
+            >
+              {perfume.brand} — {perfume.conc}
             </p>
           </div>
-          <button onClick={onClose} style={{ ...iconBtn, padding: "6px 10px" }}>
+          <button onClick={onClose} style={{ ...iconBtn, padding: "7px 12px" }}>
             Fermer
           </button>
         </div>
 
-        <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12.5, color: C.muted, margin: "14px 0 4px" }}>
-          Test n°{stat.count + 1} · aujourd'hui
+        <p
+          style={{
+            fontFamily: BODY,
+            fontSize: 10.5,
+            color: C.muted,
+            margin: "20px 0 2px",
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            lineHeight: 1.5,
+          }}
+        >
+          Test n°{stat.count + 1} — aujourd'hui — note qui était là, laisse le reste vide
         </p>
 
-        <RatingRow label={raters.a} color={C.a} value={noteA} onChange={setNoteA} />
-        <RatingRow label={raters.b} color={C.b} value={noteB} onChange={setNoteB} />
+        {RATER_KEYS.map((k) => (
+          <RatingRow
+            key={k}
+            label={raters[k]}
+            color={RATER_COLORS[k]}
+            value={notes[k]}
+            onChange={(v) => setNote(k, v)}
+          />
+        ))}
 
         <input
           value={comment}
@@ -499,12 +622,12 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
           placeholder="Un mot, une impression… (optionnel)"
           style={{
             width: "100%",
-            marginTop: 16,
-            padding: "12px 14px",
-            borderRadius: 12,
+            marginTop: 20,
+            padding: "13px 14px",
+            borderRadius: 0,
             border: `1px solid ${C.line}`,
             background: "#fff",
-            fontFamily: "Hanken Grotesk, sans-serif",
+            fontFamily: BODY,
             fontSize: 14,
             color: C.ink,
             outline: "none",
@@ -517,13 +640,16 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
           style={{
             width: "100%",
             marginTop: 16,
-            padding: "14px",
-            borderRadius: 12,
-            background: canSave ? C.ink : C.line,
-            color: canSave ? C.paper : C.muted,
-            fontFamily: "Hanken Grotesk, sans-serif",
+            padding: "15px",
+            borderRadius: 0,
+            background: canSave ? C.ink : "#fff",
+            color: canSave ? "#fff" : C.faint,
+            border: `1px solid ${canSave ? C.ink : C.line}`,
+            fontFamily: BODY,
             fontWeight: 600,
-            fontSize: 15,
+            fontSize: 12,
+            textTransform: "uppercase",
+            letterSpacing: "0.16em",
           }}
         >
           Enregistrer ce test
@@ -531,15 +657,15 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
 
         {/* Historique */}
         {stat.sessions.length > 0 && (
-          <div style={{ marginTop: 24 }}>
+          <div style={{ marginTop: 30 }}>
             <p
               style={{
-                fontFamily: "Hanken Grotesk, sans-serif",
-                fontSize: 11,
+                fontFamily: BODY,
+                fontSize: 10,
                 textTransform: "uppercase",
-                letterSpacing: "0.08em",
-                color: C.muted,
-                margin: "0 0 8px",
+                letterSpacing: "0.14em",
+                color: C.faint,
+                margin: "0 0 4px",
               }}
             >
               Historique
@@ -551,23 +677,44 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
                   display: "flex",
                   alignItems: "center",
                   gap: 10,
-                  padding: "10px 0",
+                  padding: "12px 0",
                   borderTop: `1px solid ${C.line}`,
                 }}
               >
-                <span style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 12, color: C.muted, width: 54 }}>
+                <span
+                  style={{
+                    fontFamily: BODY,
+                    fontSize: 10,
+                    color: C.muted,
+                    width: 46,
+                    flexShrink: 0,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                  }}
+                >
                   {dateFR(s.ts)}
                 </span>
-                <span style={{ fontFamily: "Fraunces, serif", fontSize: 14, color: C.a, fontWeight: 600 }}>
-                  {s.noteA ?? "–"}
-                </span>
-                <span style={{ fontFamily: "Fraunces, serif", fontSize: 14, color: C.b, fontWeight: 600 }}>
-                  {s.noteB ?? "–"}
+                <span style={{ display: "flex", gap: 7, flexShrink: 0 }}>
+                  {RATER_KEYS.map((k) => (
+                    <span
+                      key={k}
+                      style={{
+                        fontFamily: HEAD,
+                        fontSize: 14,
+                        fontWeight: 400,
+                        color: s.notes[k] ? RATER_COLORS[k] : C.line,
+                        width: 12,
+                        textAlign: "center",
+                      }}
+                    >
+                      {s.notes[k] || "·"}
+                    </span>
+                  ))}
                 </span>
                 <span
                   style={{
-                    fontFamily: "Hanken Grotesk, sans-serif",
-                    fontSize: 12.5,
+                    fontFamily: BODY,
+                    fontSize: 12,
                     color: C.ink,
                     flex: 1,
                     overflow: "hidden",
@@ -575,11 +722,18 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {s.comment || <span style={{ color: C.line }}>—</span>}
+                  {s.comment || <span style={{ color: C.faint }}>—</span>}
                 </span>
                 <button
                   onClick={() => onDelete(s.id)}
-                  style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 11, color: C.muted }}
+                  style={{
+                    fontFamily: BODY,
+                    fontSize: 9.5,
+                    color: C.muted,
+                    flexShrink: 0,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.08em",
+                  }}
                 >
                   Suppr.
                 </button>
@@ -595,20 +749,22 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
 function RatingRow({ label, color, value, onChange }) {
   const selected = SCALE.find((s) => s.v === value);
   return (
-    <div style={{ marginTop: 16 }}>
+    <div style={{ marginTop: 20 }}>
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
-          fontFamily: "Hanken Grotesk, sans-serif",
-          fontSize: 13,
-          marginBottom: 8,
+          fontFamily: BODY,
+          fontSize: 11,
+          marginBottom: 9,
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
         }}
       >
         <span style={{ color: C.ink, fontWeight: 600 }}>
           <Dot c={color} /> {label}
         </span>
-        <span style={{ color: selected ? color : C.muted, fontWeight: 500 }}>
+        <span style={{ color: selected ? color : C.faint, fontWeight: 500 }}>
           {selected ? selected.label : "à noter"}
         </span>
       </div>
@@ -622,15 +778,14 @@ function RatingRow({ label, color, value, onChange }) {
               style={{
                 flex: 1,
                 aspectRatio: "1",
-                borderRadius: 999,
-                border: `1.5px solid ${on ? color : C.line}`,
+                borderRadius: 0,
+                border: `1px solid ${on ? color : C.line}`,
                 background: on ? color : "#fff",
                 color: on ? "#fff" : C.muted,
-                fontFamily: "Fraunces, serif",
-                fontWeight: 600,
-                fontSize: 17,
-                transform: on ? "scale(1.06)" : "none",
-                transition: "transform .12s ease",
+                fontFamily: HEAD,
+                fontWeight: 400,
+                fontSize: 16,
+                transition: "background .12s ease, border-color .12s ease",
               }}
             >
               {s.v}
@@ -646,56 +801,105 @@ function RatingRow({ label, color, value, onChange }) {
 /*  Réglages                                                           */
 /* ------------------------------------------------------------------ */
 function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
-  const [a, setA] = useState(raters.a);
-  const [b, setB] = useState(raters.b);
+  const [names, setNames] = useState({ ...raters });
   const [confirmReset, setConfirmReset] = useState(false);
 
+  function setName(k, v) {
+    setNames((n) => ({ ...n, [k]: v }));
+  }
   function save() {
-    onSaveNames(a, b);
+    onSaveNames(names);
     onClose();
   }
 
+  const labels = { a: "Testeur 1", b: "Testeur 2", c: "Testeur 3", d: "Testeur 4" };
+
   return (
     <Overlay onClose={onClose}>
-      <div style={{ padding: "20px 20px 28px" }}>
-        <div style={{ width: 38, height: 4, background: C.line, borderRadius: 999, margin: "0 auto 18px" }} />
-        <h2 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontSize: 22, color: C.ink, margin: "0 0 16px" }}>
+      <div style={{ padding: "16px 22px 30px", maxHeight: "88vh", overflowY: "auto" }}>
+        <div style={{ width: 32, height: 2, background: C.line, margin: "0 auto 22px" }} />
+        <h2
+          style={{
+            fontFamily: HEAD,
+            fontWeight: 400,
+            fontSize: 20,
+            color: C.ink,
+            margin: "0 0 6px",
+            textTransform: "uppercase",
+            letterSpacing: "0.12em",
+          }}
+        >
           Réglages
         </h2>
+        <p
+          style={{
+            fontFamily: BODY,
+            fontSize: 10.5,
+            color: C.muted,
+            margin: "0 0 20px",
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            lineHeight: 1.5,
+          }}
+        >
+          Renomme les testeurs. Laisse vide pour revenir au nom par défaut.
+        </p>
 
-        <label style={lbl}>Premier testeur</label>
-        <input value={a} onChange={(e) => setA(e.target.value)} style={inp} />
-        <label style={{ ...lbl, marginTop: 14 }}>Second testeur</label>
-        <input value={b} onChange={(e) => setB(e.target.value)} style={inp} />
+        {RATER_KEYS.map((k, i) => (
+          <div key={k} style={{ marginTop: i === 0 ? 0 : 16 }}>
+            <label style={lbl}>
+              <Dot c={RATER_COLORS[k]} /> {labels[k]}
+            </label>
+            <input value={names[k]} onChange={(e) => setName(k, e.target.value)} style={inp} />
+          </div>
+        ))}
 
         <button
           onClick={save}
           style={{
             width: "100%",
-            marginTop: 18,
-            padding: 14,
-            borderRadius: 12,
+            marginTop: 22,
+            padding: 15,
+            borderRadius: 0,
             background: C.ink,
-            color: C.paper,
-            fontFamily: "Hanken Grotesk, sans-serif",
+            color: "#fff",
+            border: `1px solid ${C.ink}`,
+            fontFamily: BODY,
             fontWeight: 600,
-            fontSize: 15,
+            fontSize: 12,
+            textTransform: "uppercase",
+            letterSpacing: "0.16em",
           }}
         >
           Enregistrer
         </button>
 
-        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 22, paddingTop: 16 }}>
+        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 18 }}>
           {!confirmReset ? (
             <button
               onClick={() => setConfirmReset(true)}
-              style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 13, color: C.muted }}
+              style={{
+                fontFamily: BODY,
+                fontSize: 10.5,
+                color: C.muted,
+                textTransform: "uppercase",
+                letterSpacing: "0.1em",
+              }}
             >
               Effacer tous les tests
             </button>
           ) : (
             <div>
-              <p style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 13, color: C.ink, margin: "0 0 8px" }}>
+              <p
+                style={{
+                  fontFamily: BODY,
+                  fontSize: 11.5,
+                  color: C.ink,
+                  margin: "0 0 10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                }}
+              >
                 Sûr ? Tous les tests seront perdus.
               </p>
               <div style={{ display: "flex", gap: 10 }}>
@@ -705,13 +909,29 @@ function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
                     setConfirmReset(false);
                     onClose();
                   }}
-                  style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 13, color: "#fff", background: C.a, padding: "8px 14px", borderRadius: 10 }}
+                  style={{
+                    fontFamily: BODY,
+                    fontSize: 10.5,
+                    color: "#fff",
+                    background: C.a,
+                    padding: "10px 16px",
+                    borderRadius: 0,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                  }}
                 >
                   Oui, effacer
                 </button>
                 <button
                   onClick={() => setConfirmReset(false)}
-                  style={{ fontFamily: "Hanken Grotesk, sans-serif", fontSize: 13, color: C.muted, padding: "8px 14px" }}
+                  style={{
+                    fontFamily: BODY,
+                    fontSize: 10.5,
+                    color: C.muted,
+                    padding: "10px 16px",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                  }}
                 >
                   Annuler
                 </button>
@@ -725,19 +945,21 @@ function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
 }
 
 const lbl = {
-  fontFamily: "Hanken Grotesk, sans-serif",
-  fontSize: 12,
+  fontFamily: BODY,
+  fontSize: 10,
   color: C.muted,
   display: "block",
-  marginBottom: 5,
+  marginBottom: 6,
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
 };
 const inp = {
   width: "100%",
-  padding: "11px 13px",
-  borderRadius: 11,
+  padding: "12px 13px",
+  borderRadius: 0,
   border: `1px solid ${C.line}`,
   background: "#fff",
-  fontFamily: "Hanken Grotesk, sans-serif",
+  fontFamily: BODY,
   fontSize: 14,
   color: C.ink,
   outline: "none",
@@ -753,7 +975,7 @@ function Overlay({ children, onClose }) {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(35,32,26,0.45)",
+        background: "rgba(26,26,26,0.4)",
         display: "flex",
         alignItems: "flex-end",
         justifyContent: "center",
@@ -766,8 +988,8 @@ function Overlay({ children, onClose }) {
         style={{
           width: "100%",
           maxWidth: 480,
-          background: C.paper,
-          borderRadius: "22px 22px 0 0",
+          background: C.bg,
+          borderRadius: "2px 2px 0 0",
           animation: "rise .26s cubic-bezier(.2,.8,.2,1)",
         }}
       >
