@@ -24,7 +24,7 @@ const { useState, useMemo } = React;
 /* ------------------------------------------------------------------ */
 /*  Données fixes                                                      */
 /* ------------------------------------------------------------------ */
-const PERFUMES = [
+const DEFAULT_PERFUMES = [
   { id: "layton", name: "Layton", brand: "Parfums de Marly", conc: "EDP" },
   { id: "couleur-nuit", name: "La Couleur de la Nuit", brand: "Voyages Imaginaires", conc: "EDP" },
   { id: "sel-marin", name: "Sel Marin", brand: "Heeley", conc: "EDP" },
@@ -43,8 +43,15 @@ const SCALE = [
   { v: 5, label: "Whoaou" },
 ];
 
+const MOMENTS = [
+  { id: "matin", label: "Matin", sub: "T+30min" },
+  { id: "midi", label: "Midi", sub: "T+2h" },
+  { id: "aprem", label: "Aprem", sub: "T+6h" },
+  { id: "autre", label: "Autre", sub: "libre" },
+];
+const MOMENT_LABEL = { matin: "Matin", midi: "Midi", aprem: "Aprem", autre: "Autre" };
+
 const STORAGE_KEY = "parfum-suivi-v1";
-const TARGET_TESTS = 3;
 
 /* ------------------------------------------------------------------ */
 /*  Style — palette couture épurée                                     */
@@ -55,24 +62,27 @@ const C = {
   muted: "#8E8E8E",
   faint: "#B8B8B8",
   line: "#E6E6E6",
-  a: "#B14E2A", // testeur 1
-  b: "#2E665E", // testeur 2
-  c: "#9C6B28", // testeur 3
-  d: "#586349", // testeur 4
+  a: "#B14E2A",
+  b: "#2E665E",
+  c: "#9C6B28",
+  d: "#586349",
 };
 
 const HEAD = "'Jost', sans-serif";
 const BODY = "'Hanken Grotesk', sans-serif";
 
-/* 4 testeurs renommables */
 const RATER_KEYS = ["a", "b", "c", "d"];
 const RATER_DEFAULTS = { a: "Moi", b: "Ma copine", c: "Ma mère", d: "Autres testeurs" };
 const RATER_COLORS = { a: C.a, b: C.b, c: C.c, d: C.d };
 
 /* ------------------------------------------------------------------ */
-/*  Persistance — localStorage (fonctionne sur site déployé)           */
+/*  Persistance                                                        */
 /* ------------------------------------------------------------------ */
-const DEFAULT_DATA = { raters: { ...RATER_DEFAULTS }, sessions: [] };
+const DEFAULT_DATA = {
+  raters: { ...RATER_DEFAULTS },
+  perfumes: [...DEFAULT_PERFUMES],
+  sessions: [],
+};
 
 const STORAGE_OK = (() => {
   try {
@@ -85,22 +95,26 @@ const STORAGE_OK = (() => {
   }
 })();
 
-/* migration : complète les testeurs manquants + convertit les anciens
-   tests (noteA/noteB) vers le nouveau format notes:{a,b,c,d} */
+/* migration : tests anciens (sans moment, sans notes:{}) + perfumes par défaut si absents */
 function migrate(data) {
   const raters = { ...RATER_DEFAULTS, ...(data && data.raters ? data.raters : {}) };
+  const perfumes = data && Array.isArray(data.perfumes) && data.perfumes.length
+    ? data.perfumes
+    : [...DEFAULT_PERFUMES];
   const rawSessions = data && Array.isArray(data.sessions) ? data.sessions : [];
   const sessions = rawSessions.map((s) => {
-    if (s.notes) return s;
+    let notes = s.notes;
+    if (!notes) notes = { a: s.noteA || null, b: s.noteB || null, c: null, d: null };
     return {
       id: s.id,
       perfumeId: s.perfumeId,
       ts: s.ts,
       comment: s.comment || "",
-      notes: { a: s.noteA || null, b: s.noteB || null, c: null, d: null },
+      moment: s.moment || "autre",
+      notes,
     };
   });
-  return { raters, sessions };
+  return { raters, perfumes, sessions };
 }
 
 function loadData() {
@@ -132,15 +146,18 @@ const avg = (arr) => (arr.length ? arr.reduce((s, n) => s + n, 0) / arr.length :
 const fmt = (n) => (n == null ? "–" : n.toFixed(1).replace(".", ","));
 const dateFR = (iso) =>
   new Date(iso).toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+const slug = (s) =>
+  s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "parfum";
 
 /* ------------------------------------------------------------------ */
 /*  App                                                                */
 /* ------------------------------------------------------------------ */
 function App() {
   const [data, setData] = useState(() => loadData());
-  const [active, setActive] = useState(null); // perfume id (bottom sheet)
+  const [active, setActive] = useState(null);
   const [settings, setSettings] = useState(false);
-  const [saveStatus, setSaveStatus] = useState("idle"); // idle | saved | failed
+  const [addingPerfume, setAddingPerfume] = useState(false);
+  const [saveStatus, setSaveStatus] = useState("idle");
 
   function commit(next) {
     setData(next);
@@ -149,11 +166,12 @@ function App() {
     if (ok) setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1500);
   }
 
-  function addSession(perfumeId, notes, comment) {
+  function addSession(perfumeId, moment, notes, comment) {
     const session = {
       id: Date.now().toString(36),
       perfumeId,
       ts: new Date().toISOString(),
+      moment,
       notes: {
         a: notes.a || null,
         b: notes.b || null,
@@ -172,43 +190,83 @@ function App() {
     for (const k of RATER_KEYS) clean[k] = (next[k] || "").trim() || RATER_DEFAULTS[k];
     commit({ ...data, raters: clean });
   }
+  function addPerfume({ name, brand, conc }) {
+    const trimmedName = (name || "").trim();
+    if (!trimmedName) return;
+    const baseId = slug(trimmedName);
+    let id = baseId;
+    let i = 2;
+    while (data.perfumes.some((p) => p.id === id)) id = `${baseId}-${i++}`;
+    const perfume = {
+      id,
+      name: trimmedName,
+      brand: (brand || "").trim() || "—",
+      conc: (conc || "").trim() || "EDP",
+      custom: true,
+    };
+    commit({ ...data, perfumes: [...data.perfumes, perfume] });
+  }
+  function removePerfume(perfumeId) {
+    commit({
+      ...data,
+      perfumes: data.perfumes.filter((p) => p.id !== perfumeId),
+      sessions: data.sessions.filter((s) => s.perfumeId !== perfumeId),
+    });
+  }
   function resetAll() {
-    commit({ raters: data.raters, sessions: [] });
+    commit({ raters: data.raters, perfumes: data.perfumes, sessions: [] });
   }
 
   /* stats par parfum */
   const stats = useMemo(() => {
     const map = {};
-    for (const p of PERFUMES) {
+    for (const p of data.perfumes) {
       const ss = data.sessions.filter((s) => s.perfumeId === p.id);
       const byRater = {};
+      const byMoment = {};
       let all = [];
       for (const k of RATER_KEYS) {
         const notes = ss.map((s) => s.notes[k]).filter(Boolean);
         byRater[k] = avg(notes);
         all = all.concat(notes);
       }
+      for (const m of MOMENTS) {
+        const notes = ss
+          .filter((s) => s.moment === m.id)
+          .flatMap((s) => RATER_KEYS.map((k) => s.notes[k]).filter(Boolean));
+        byMoment[m.id] = avg(notes);
+      }
       map[p.id] = {
         count: ss.length,
         byRater,
+        byMoment,
         combined: avg(all),
         sessions: ss,
       };
     }
     return map;
-  }, [data.sessions]);
+  }, [data.sessions, data.perfumes]);
 
-  /* classement : testés (combined desc) puis non testés */
+  /* dernier parfum testé */
+  const lastTested = useMemo(() => {
+    if (data.sessions.length === 0) return null;
+    const lastSession = data.sessions[0];
+    const p = data.perfumes.find((p) => p.id === lastSession.perfumeId);
+    if (!p) return null;
+    return { perfume: p, session: lastSession };
+  }, [data.sessions, data.perfumes]);
+
+  /* classement */
   const ranked = useMemo(() => {
-    const tested = PERFUMES.filter((p) => stats[p.id].count > 0).sort(
+    const tested = data.perfumes.filter((p) => stats[p.id].count > 0).sort(
       (x, y) => stats[y.id].combined - stats[x.id].combined
     );
-    const untested = PERFUMES.filter((p) => stats[p.id].count === 0);
+    const untested = data.perfumes.filter((p) => stats[p.id].count === 0);
     return { tested, untested };
-  }, [stats]);
+  }, [stats, data.perfumes]);
 
   const totalTests = data.sessions.length;
-  const triedCount = PERFUMES.length - ranked.untested.length;
+  const triedCount = data.perfumes.length - ranked.untested.length;
 
   return (
     <Shell>
@@ -240,7 +298,7 @@ function App() {
                 letterSpacing: "0.12em",
               }}
             >
-              8 échantillons — {totalTests} test{totalTests > 1 ? "s" : ""} — {triedCount}/8 goûtés
+              {data.perfumes.length} échantillons — {totalTests} test{totalTests > 1 ? "s" : ""} — {triedCount}/{data.perfumes.length} goûtés
             </p>
           </div>
           <button onClick={() => setSettings(true)} style={iconBtn}>
@@ -252,7 +310,7 @@ function App() {
         {STORAGE_OK && saveStatus === "saved" && <Notice color={C.b}>Enregistré</Notice>}
       </header>
 
-      {/* Légende */}
+      {/* Légende testeurs */}
       <div
         style={{
           display: "flex",
@@ -271,8 +329,17 @@ function App() {
         ))}
       </div>
 
+      {/* Dernier porté */}
+      {lastTested && (
+        <LastWornBlock
+          perfume={lastTested.perfume}
+          session={lastTested.session}
+          onTap={() => setActive(lastTested.perfume.id)}
+        />
+      )}
+
       {/* Classement */}
-      <main style={{ padding: "0 22px 48px" }}>
+      <main style={{ padding: "0 22px 32px" }}>
         <div style={{ borderTop: `1px solid ${C.line}` }}>
           {ranked.tested.map((p, i) => (
             <PerfumeRow
@@ -314,17 +381,47 @@ function App() {
             />
           ))}
         </div>
+
+        {/* Bouton ajouter parfum */}
+        <button
+          onClick={() => setAddingPerfume(true)}
+          style={{
+            width: "100%",
+            marginTop: 22,
+            padding: "14px",
+            borderRadius: 0,
+            background: "#fff",
+            color: C.ink,
+            border: `1px dashed ${C.line}`,
+            fontFamily: BODY,
+            fontWeight: 500,
+            fontSize: 11,
+            textTransform: "uppercase",
+            letterSpacing: "0.14em",
+          }}
+        >
+          + Ajouter un parfum
+        </button>
       </main>
 
       {/* Feuille de test */}
       {active && (
         <TestSheet
-          perfume={PERFUMES.find((p) => p.id === active)}
+          perfume={data.perfumes.find((p) => p.id === active)}
           stat={stats[active]}
           raters={data.raters}
           onClose={() => setActive(null)}
           onSave={addSession}
           onDelete={deleteSession}
+          onRemovePerfume={removePerfume}
+        />
+      )}
+
+      {/* Ajout parfum */}
+      {addingPerfume && (
+        <AddPerfumeSheet
+          onClose={() => setAddingPerfume(false)}
+          onSave={(p) => { addPerfume(p); setAddingPerfume(false); }}
         />
       )}
 
@@ -342,7 +439,84 @@ function App() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Coquille + polices                                                 */
+/*  Dernier porté — bloc épinglé en haut                               */
+/* ------------------------------------------------------------------ */
+function LastWornBlock({ perfume, session, onTap }) {
+  const today = new Date();
+  const sessionDate = new Date(session.ts);
+  const isToday = today.toDateString() === sessionDate.toDateString();
+  const dayLabel = isToday ? "Aujourd'hui" : dateFR(session.ts);
+
+  return (
+    <button
+      onClick={onTap}
+      style={{
+        margin: "0 22px 26px",
+        padding: "16px 18px",
+        background: C.ink,
+        color: "#fff",
+        border: "none",
+        borderRadius: 0,
+        display: "block",
+        width: "calc(100% - 44px)",
+        textAlign: "left",
+        animation: "fade .4s ease both",
+      }}
+    >
+      <div
+        style={{
+          fontFamily: BODY,
+          fontSize: 9.5,
+          textTransform: "uppercase",
+          letterSpacing: "0.18em",
+          color: "rgba(255,255,255,0.65)",
+          marginBottom: 8,
+        }}
+      >
+        {dayLabel} — Dernier porté
+      </div>
+      <div
+        style={{
+          fontFamily: HEAD,
+          fontWeight: 400,
+          fontSize: 21,
+          color: "#fff",
+          letterSpacing: "0.04em",
+        }}
+      >
+        {perfume.name}
+      </div>
+      <div
+        style={{
+          fontFamily: BODY,
+          fontSize: 10.5,
+          color: "rgba(255,255,255,0.7)",
+          marginTop: 6,
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {perfume.brand} — {perfume.conc}
+      </div>
+      <div
+        style={{
+          fontFamily: BODY,
+          fontSize: 10.5,
+          color: "#fff",
+          marginTop: 12,
+          fontWeight: 500,
+          textTransform: "uppercase",
+          letterSpacing: "0.14em",
+        }}
+      >
+        Noter ce test →
+      </div>
+    </button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Coquille                                                           */
 /* ------------------------------------------------------------------ */
 function Shell({ children }) {
   return (
@@ -410,6 +584,8 @@ function Dot({ c }) {
 function PerfumeRow({ perfume, stat, rank, raters, isTop, onTap }) {
   const tested = stat.count > 0;
   const activeRaters = RATER_KEYS.filter((k) => stat.byRater[k] != null);
+  const activeMoments = MOMENTS.filter((m) => stat.byMoment[m.id] != null);
+
   return (
     <button
       onClick={onTap}
@@ -479,7 +655,7 @@ function PerfumeRow({ perfume, stat, rank, raters, isTop, onTap }) {
               letterSpacing: "0.08em",
             }}
           >
-            {tested ? `${stat.count}/${TARGET_TESTS} test${stat.count > 1 ? "s" : ""}` : "à tester"}
+            {tested ? `${stat.count} test${stat.count > 1 ? "s" : ""}` : "à tester"}
           </div>
         </div>
       </div>
@@ -491,6 +667,29 @@ function PerfumeRow({ perfume, stat, rank, raters, isTop, onTap }) {
           ))}
         </div>
       )}
+
+      {tested && activeMoments.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0 14px",
+            marginTop: 12,
+            fontFamily: BODY,
+            fontSize: 9.5,
+            color: C.muted,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+          }}
+        >
+          {activeMoments.map((m) => (
+            <span key={m.id}>
+              {m.label} <span style={{ color: C.ink, fontWeight: 600 }}>{fmt(stat.byMoment[m.id])}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
       {!tested && (
         <div
           style={{
@@ -537,20 +736,20 @@ function MiniBar({ label, value, color }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Feuille de test (bottom sheet)                                     */
+/*  Feuille de test                                                    */
 /* ------------------------------------------------------------------ */
-function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
+function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete, onRemovePerfume }) {
+  const [moment, setMoment] = useState("matin");
   const [notes, setNotes] = useState({ a: 0, b: 0, c: 0, d: 0 });
   const [comment, setComment] = useState("");
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   const canSave = RATER_KEYS.some((k) => notes[k] > 0);
 
-  function setNote(k, v) {
-    setNotes((n) => ({ ...n, [k]: v }));
-  }
+  function setNote(k, v) { setNotes((n) => ({ ...n, [k]: v })); }
   function save() {
     if (!canSave) return;
-    onSave(perfume.id, notes, comment);
+    onSave(perfume.id, moment, notes, comment);
     setNotes({ a: 0, b: 0, c: 0, d: 0 });
     setComment("");
   }
@@ -562,58 +761,56 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
-            <h2
-              style={{
-                fontFamily: HEAD,
-                fontWeight: 400,
-                fontSize: 21,
-                color: C.ink,
-                margin: 0,
-                letterSpacing: "0.05em",
-              }}
-            >
+            <h2 style={{ fontFamily: HEAD, fontWeight: 400, fontSize: 21, color: C.ink, margin: 0, letterSpacing: "0.05em" }}>
               {perfume.name}
             </h2>
-            <p
-              style={{
-                fontFamily: BODY,
-                fontSize: 10.5,
-                color: C.muted,
-                margin: "5px 0 0",
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-              }}
-            >
+            <p style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, margin: "5px 0 0", textTransform: "uppercase", letterSpacing: "0.08em" }}>
               {perfume.brand} — {perfume.conc}
             </p>
           </div>
-          <button onClick={onClose} style={{ ...iconBtn, padding: "7px 12px" }}>
-            Fermer
-          </button>
+          <button onClick={onClose} style={{ ...iconBtn, padding: "7px 12px" }}>Fermer</button>
         </div>
 
-        <p
-          style={{
-            fontFamily: BODY,
-            fontSize: 10.5,
-            color: C.muted,
-            margin: "20px 0 2px",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-            lineHeight: 1.5,
-          }}
-        >
-          Test n°{stat.count + 1} — aujourd'hui — note qui était là, laisse le reste vide
+        {/* Sélecteur de moment */}
+        <p style={{ fontFamily: BODY, fontSize: 10, color: C.faint, margin: "22px 0 8px", textTransform: "uppercase", letterSpacing: "0.14em" }}>
+          Quel moment du test ?
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+          {MOMENTS.map((m) => {
+            const on = moment === m.id;
+            return (
+              <button
+                key={m.id}
+                onClick={() => setMoment(m.id)}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 0,
+                  border: `1px solid ${on ? C.ink : C.line}`,
+                  background: on ? C.ink : "#fff",
+                  color: on ? "#fff" : C.ink,
+                  fontFamily: BODY,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  lineHeight: 1.3,
+                }}
+              >
+                {m.label}
+                <div style={{ fontSize: 9, fontWeight: 400, letterSpacing: "0.04em", marginTop: 3, color: on ? "rgba(255,255,255,0.7)" : C.faint }}>
+                  {m.sub}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <p style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, margin: "22px 0 0", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          Test n°{stat.count + 1} — note qui était là, laisse le reste vide
         </p>
 
         {RATER_KEYS.map((k) => (
-          <RatingRow
-            key={k}
-            label={raters[k]}
-            color={RATER_COLORS[k]}
-            value={notes[k]}
-            onChange={(v) => setNote(k, v)}
-          />
+          <RatingRow key={k} label={raters[k]} color={RATER_COLORS[k]} value={notes[k]} onChange={(v) => setNote(k, v)} />
         ))}
 
         <input
@@ -658,87 +855,57 @@ function TestSheet({ perfume, stat, raters, onClose, onSave, onDelete }) {
         {/* Historique */}
         {stat.sessions.length > 0 && (
           <div style={{ marginTop: 30 }}>
-            <p
-              style={{
-                fontFamily: BODY,
-                fontSize: 10,
-                textTransform: "uppercase",
-                letterSpacing: "0.14em",
-                color: C.faint,
-                margin: "0 0 4px",
-              }}
-            >
+            <p style={{ fontFamily: BODY, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.14em", color: C.faint, margin: "0 0 4px" }}>
               Historique
             </p>
             {stat.sessions.map((s) => (
-              <div
-                key={s.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "12px 0",
-                  borderTop: `1px solid ${C.line}`,
-                }}
-              >
-                <span
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: 10,
-                    color: C.muted,
-                    width: 46,
-                    flexShrink: 0,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.04em",
-                  }}
-                >
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 0", borderTop: `1px solid ${C.line}` }}>
+                <span style={{ fontFamily: BODY, fontSize: 10, color: C.muted, width: 46, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                   {dateFR(s.ts)}
                 </span>
-                <span style={{ display: "flex", gap: 7, flexShrink: 0 }}>
+                <span style={{ fontFamily: BODY, fontSize: 9.5, color: C.ink, width: 46, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 500 }}>
+                  {MOMENT_LABEL[s.moment] || "—"}
+                </span>
+                <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                   {RATER_KEYS.map((k) => (
-                    <span
-                      key={k}
-                      style={{
-                        fontFamily: HEAD,
-                        fontSize: 14,
-                        fontWeight: 400,
-                        color: s.notes[k] ? RATER_COLORS[k] : C.line,
-                        width: 12,
-                        textAlign: "center",
-                      }}
-                    >
+                    <span key={k} style={{ fontFamily: HEAD, fontSize: 14, fontWeight: 400, color: s.notes[k] ? RATER_COLORS[k] : C.line, width: 11, textAlign: "center" }}>
                       {s.notes[k] || "·"}
                     </span>
                   ))}
                 </span>
-                <span
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: 12,
-                    color: C.ink,
-                    flex: 1,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
+                <span style={{ fontFamily: BODY, fontSize: 12, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                   {s.comment || <span style={{ color: C.faint }}>—</span>}
                 </span>
-                <button
-                  onClick={() => onDelete(s.id)}
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: 9.5,
-                    color: C.muted,
-                    flexShrink: 0,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.08em",
-                  }}
-                >
+                <button onClick={() => onDelete(s.id)} style={{ fontFamily: BODY, fontSize: 9.5, color: C.muted, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.08em" }}>
                   Suppr.
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Suppression parfum custom */}
+        {perfume.custom && (
+          <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 24, paddingTop: 18 }}>
+            {!confirmRemove ? (
+              <button onClick={() => setConfirmRemove(true)} style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                Supprimer ce parfum
+              </button>
+            ) : (
+              <div>
+                <p style={{ fontFamily: BODY, fontSize: 11.5, color: C.ink, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  Sûr ? Le parfum et ses tests seront perdus.
+                </p>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={() => { onRemovePerfume(perfume.id); onClose(); }} style={{ fontFamily: BODY, fontSize: 10.5, color: "#fff", background: C.a, padding: "10px 16px", borderRadius: 0, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                    Oui, supprimer
+                  </button>
+                  <button onClick={() => setConfirmRemove(false)} style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, padding: "10px 16px", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -750,17 +917,7 @@ function RatingRow({ label, color, value, onChange }) {
   const selected = SCALE.find((s) => s.v === value);
   return (
     <div style={{ marginTop: 20 }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          fontFamily: BODY,
-          fontSize: 11,
-          marginBottom: 9,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-        }}
-      >
+      <div style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontSize: 11, marginBottom: 9, textTransform: "uppercase", letterSpacing: "0.08em" }}>
         <span style={{ color: C.ink, fontWeight: 600 }}>
           <Dot c={color} /> {label}
         </span>
@@ -798,19 +955,92 @@ function RatingRow({ label, color, value, onChange }) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Ajout parfum                                                       */
+/* ------------------------------------------------------------------ */
+function AddPerfumeSheet({ onClose, onSave }) {
+  const [name, setName] = useState("");
+  const [brand, setBrand] = useState("");
+  const [conc, setConc] = useState("EDP");
+  const canSave = name.trim().length > 0;
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ padding: "16px 22px 30px" }}>
+        <div style={{ width: 32, height: 2, background: C.line, margin: "0 auto 22px" }} />
+        <h2 style={{ fontFamily: HEAD, fontWeight: 400, fontSize: 20, color: C.ink, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.12em" }}>
+          Nouveau parfum
+        </h2>
+        <p style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, margin: "0 0 20px", textTransform: "uppercase", letterSpacing: "0.06em", lineHeight: 1.5 }}>
+          Le nom suffit. Marque et concentration sont optionnelles.
+        </p>
+
+        <label style={lbl}>Nom du parfum</label>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex. Aventus" style={inp} autoFocus />
+
+        <label style={{ ...lbl, marginTop: 14 }}>Marque</label>
+        <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Ex. Creed" style={inp} />
+
+        <label style={{ ...lbl, marginTop: 14 }}>Concentration</label>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+          {["EDT", "EDP", "Extrait", "Cologne"].map((opt) => {
+            const on = conc === opt;
+            return (
+              <button
+                key={opt}
+                onClick={() => setConc(opt)}
+                style={{
+                  padding: "10px 4px",
+                  borderRadius: 0,
+                  border: `1px solid ${on ? C.ink : C.line}`,
+                  background: on ? C.ink : "#fff",
+                  color: on ? "#fff" : C.ink,
+                  fontFamily: BODY,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                }}
+              >
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          onClick={() => canSave && onSave({ name, brand, conc })}
+          disabled={!canSave}
+          style={{
+            width: "100%",
+            marginTop: 22,
+            padding: 15,
+            borderRadius: 0,
+            background: canSave ? C.ink : "#fff",
+            color: canSave ? "#fff" : C.faint,
+            border: `1px solid ${canSave ? C.ink : C.line}`,
+            fontFamily: BODY,
+            fontWeight: 600,
+            fontSize: 12,
+            textTransform: "uppercase",
+            letterSpacing: "0.16em",
+          }}
+        >
+          Ajouter
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Réglages                                                           */
 /* ------------------------------------------------------------------ */
 function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
   const [names, setNames] = useState({ ...raters });
   const [confirmReset, setConfirmReset] = useState(false);
 
-  function setName(k, v) {
-    setNames((n) => ({ ...n, [k]: v }));
-  }
-  function save() {
-    onSaveNames(names);
-    onClose();
-  }
+  function setName(k, v) { setNames((n) => ({ ...n, [k]: v })); }
+  function save() { onSaveNames(names); onClose(); }
 
   const labels = { a: "Testeur 1", b: "Testeur 2", c: "Testeur 3", d: "Testeur 4" };
 
@@ -818,38 +1048,16 @@ function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
     <Overlay onClose={onClose}>
       <div style={{ padding: "16px 22px 30px", maxHeight: "88vh", overflowY: "auto" }}>
         <div style={{ width: 32, height: 2, background: C.line, margin: "0 auto 22px" }} />
-        <h2
-          style={{
-            fontFamily: HEAD,
-            fontWeight: 400,
-            fontSize: 20,
-            color: C.ink,
-            margin: "0 0 6px",
-            textTransform: "uppercase",
-            letterSpacing: "0.12em",
-          }}
-        >
+        <h2 style={{ fontFamily: HEAD, fontWeight: 400, fontSize: 20, color: C.ink, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.12em" }}>
           Réglages
         </h2>
-        <p
-          style={{
-            fontFamily: BODY,
-            fontSize: 10.5,
-            color: C.muted,
-            margin: "0 0 20px",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-            lineHeight: 1.5,
-          }}
-        >
+        <p style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, margin: "0 0 20px", textTransform: "uppercase", letterSpacing: "0.06em", lineHeight: 1.5 }}>
           Renomme les testeurs. Laisse vide pour revenir au nom par défaut.
         </p>
 
         {RATER_KEYS.map((k, i) => (
           <div key={k} style={{ marginTop: i === 0 ? 0 : 16 }}>
-            <label style={lbl}>
-              <Dot c={RATER_COLORS[k]} /> {labels[k]}
-            </label>
+            <label style={lbl}><Dot c={RATER_COLORS[k]} /> {labels[k]}</label>
             <input value={names[k]} onChange={(e) => setName(k, e.target.value)} style={inp} />
           </div>
         ))}
@@ -876,63 +1084,19 @@ function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
 
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 18 }}>
           {!confirmReset ? (
-            <button
-              onClick={() => setConfirmReset(true)}
-              style={{
-                fontFamily: BODY,
-                fontSize: 10.5,
-                color: C.muted,
-                textTransform: "uppercase",
-                letterSpacing: "0.1em",
-              }}
-            >
+            <button onClick={() => setConfirmReset(true)} style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: "0.1em" }}>
               Effacer tous les tests
             </button>
           ) : (
             <div>
-              <p
-                style={{
-                  fontFamily: BODY,
-                  fontSize: 11.5,
-                  color: C.ink,
-                  margin: "0 0 10px",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                }}
-              >
+              <p style={{ fontFamily: BODY, fontSize: 11.5, color: C.ink, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
                 Sûr ? Tous les tests seront perdus.
               </p>
               <div style={{ display: "flex", gap: 10 }}>
-                <button
-                  onClick={() => {
-                    onReset();
-                    setConfirmReset(false);
-                    onClose();
-                  }}
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: 10.5,
-                    color: "#fff",
-                    background: C.a,
-                    padding: "10px 16px",
-                    borderRadius: 0,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.1em",
-                  }}
-                >
+                <button onClick={() => { onReset(); setConfirmReset(false); onClose(); }} style={{ fontFamily: BODY, fontSize: 10.5, color: "#fff", background: C.a, padding: "10px 16px", borderRadius: 0, textTransform: "uppercase", letterSpacing: "0.1em" }}>
                   Oui, effacer
                 </button>
-                <button
-                  onClick={() => setConfirmReset(false)}
-                  style={{
-                    fontFamily: BODY,
-                    fontSize: 10.5,
-                    color: C.muted,
-                    padding: "10px 16px",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.1em",
-                  }}
-                >
+                <button onClick={() => setConfirmReset(false)} style={{ fontFamily: BODY, fontSize: 10.5, color: C.muted, padding: "10px 16px", textTransform: "uppercase", letterSpacing: "0.1em" }}>
                   Annuler
                 </button>
               </div>
@@ -999,9 +1163,6 @@ function Overlay({ children, onClose }) {
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Montage                                                            */
-/* ------------------------------------------------------------------ */
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App />);
   </script>
