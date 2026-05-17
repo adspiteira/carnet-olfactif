@@ -149,6 +149,92 @@ const dateFR = (iso) =>
 const slug = (s) =>
   s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "parfum";
 
+/* résumé lisible (format A) */
+function buildSummary(data, stats) {
+  const tested = data.perfumes
+    .filter((p) => stats[p.id].count > 0)
+    .sort((x, y) => stats[y.id].combined - stats[x.id].combined);
+  const untested = data.perfumes.filter((p) => stats[p.id].count === 0);
+
+  const lines = [];
+  lines.push("CARNET OLFACTIF — RÉSUMÉ");
+  lines.push(new Date().toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" }));
+  lines.push("");
+  lines.push(`${data.perfumes.length} parfums · ${data.sessions.length} test(s) · ${tested.length} goûté(s)`);
+  lines.push("");
+  lines.push("CLASSEMENT");
+
+  tested.forEach((p, i) => {
+    const st = stats[p.id];
+    lines.push("");
+    lines.push(`${String(i + 1).padStart(2, "0")}. ${p.name} — ${p.brand} (${p.conc})`);
+    lines.push(`    Note globale : ${fmt(st.combined)}/5 — ${st.count} test(s)`);
+
+    const raterBits = RATER_KEYS
+      .filter((k) => st.byRater[k] != null)
+      .map((k) => `${data.raters[k]} ${fmt(st.byRater[k])}`);
+    if (raterBits.length) lines.push(`    Par testeur : ${raterBits.join(" · ")}`);
+
+    const momentBits = MOMENTS
+      .filter((m) => st.byMoment[m.id] != null)
+      .map((m) => `${m.label} ${fmt(st.byMoment[m.id])}`);
+    if (momentBits.length) lines.push(`    Par moment : ${momentBits.join(" · ")}`);
+
+    const comments = st.sessions
+      .filter((s) => s.comment)
+      .map((s) => `${dateFR(s.ts)} (${MOMENT_LABEL[s.moment] || "—"}) : ${s.comment}`);
+    if (comments.length) {
+      lines.push("    Commentaires :");
+      comments.forEach((c) => lines.push(`      - ${c}`));
+    }
+  });
+
+  if (untested.length) {
+    lines.push("");
+    lines.push("PAS ENCORE TESTÉS");
+    untested.forEach((p) => lines.push(`    - ${p.name} (${p.brand})`));
+  }
+
+  return lines.join("\n");
+}
+
+/* copie presse-papier avec repli */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* repli ci-dessous */ }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* téléchargement fichier */
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /* ------------------------------------------------------------------ */
 /*  App                                                                */
 /* ------------------------------------------------------------------ */
@@ -215,6 +301,16 @@ function App() {
   }
   function resetAll() {
     commit({ raters: data.raters, perfumes: data.perfumes, sessions: [] });
+  }
+  function importData(json) {
+    try {
+      const parsed = JSON.parse(json);
+      const migrated = migrate(parsed);
+      commit(migrated);
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   /* stats par parfum */
@@ -432,6 +528,9 @@ function App() {
           onClose={() => setSettings(false)}
           onSaveNames={setRaters}
           onReset={resetAll}
+          summaryText={buildSummary(data, stats)}
+          rawData={data}
+          onImport={importData}
         />
       )}
     </Shell>
@@ -1035,12 +1134,41 @@ function AddPerfumeSheet({ onClose, onSave }) {
 /* ------------------------------------------------------------------ */
 /*  Réglages                                                           */
 /* ------------------------------------------------------------------ */
-function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
+function SettingsSheet({ raters, onClose, onSaveNames, onReset, summaryText, rawData, onImport }) {
   const [names, setNames] = useState({ ...raters });
   const [confirmReset, setConfirmReset] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+  const [showSummary, setShowSummary] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
 
   function setName(k, v) { setNames((n) => ({ ...n, [k]: v })); }
   function save() { onSaveNames(names); onClose(); }
+
+  async function doCopy() {
+    const ok = await copyText(summaryText);
+    if (ok) {
+      setCopyMsg("Copié — colle-le où tu veux");
+      setTimeout(() => setCopyMsg(""), 2500);
+    } else {
+      setShowSummary(true);
+      setCopyMsg("");
+    }
+  }
+  function doDownload() {
+    const stamp = new Date().toISOString().slice(0, 10);
+    downloadFile(`carnet-olfactif-${stamp}.json`, JSON.stringify(rawData, null, 2));
+  }
+  function doImportFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const ok = onImport(String(reader.result));
+      setImportMsg(ok ? "Sauvegarde importée ✓" : "Fichier invalide");
+      if (ok) setTimeout(onClose, 900);
+    };
+    reader.readAsText(file);
+  }
 
   const labels = { a: "Testeur 1", b: "Testeur 2", c: "Testeur 3", d: "Testeur 4" };
 
@@ -1081,6 +1209,110 @@ function SettingsSheet({ raters, onClose, onSaveNames, onReset }) {
         >
           Enregistrer
         </button>
+
+        {/* Export / Sauvegarde */}
+        <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 20 }}>
+          <p style={{ fontFamily: BODY, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.14em", color: C.faint, margin: "0 0 12px" }}>
+            Données
+          </p>
+
+          <button
+            onClick={doCopy}
+            style={{
+              width: "100%",
+              padding: 14,
+              borderRadius: 0,
+              background: "#fff",
+              color: C.ink,
+              border: `1px solid ${C.ink}`,
+              fontFamily: BODY,
+              fontWeight: 600,
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.14em",
+            }}
+          >
+            Copier le résumé
+          </button>
+          {copyMsg && (
+            <p style={{ fontFamily: BODY, fontSize: 10.5, color: C.b, margin: "8px 0 0", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {copyMsg}
+            </p>
+          )}
+          {showSummary && (
+            <div style={{ marginTop: 10 }}>
+              <p style={{ fontFamily: BODY, fontSize: 10, color: C.muted, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Copie auto bloquée — appui long dans le cadre → Tout sélectionner → Copier
+              </p>
+              <textarea
+                readOnly
+                value={summaryText}
+                onFocus={(e) => e.target.select()}
+                style={{
+                  width: "100%",
+                  height: 160,
+                  padding: 12,
+                  borderRadius: 0,
+                  border: `1px solid ${C.line}`,
+                  background: "#fff",
+                  fontFamily: "monospace",
+                  fontSize: 11,
+                  color: C.ink,
+                  outline: "none",
+                  resize: "none",
+                }}
+              />
+            </div>
+          )}
+
+          <button
+            onClick={doDownload}
+            style={{
+              width: "100%",
+              marginTop: 10,
+              padding: 14,
+              borderRadius: 0,
+              background: "#fff",
+              color: C.muted,
+              border: `1px solid ${C.line}`,
+              fontFamily: BODY,
+              fontWeight: 500,
+              fontSize: 10.5,
+              textTransform: "uppercase",
+              letterSpacing: "0.12em",
+            }}
+          >
+            Télécharger la sauvegarde
+          </button>
+
+          <label
+            style={{
+              display: "block",
+              width: "100%",
+              marginTop: 10,
+              padding: 14,
+              borderRadius: 0,
+              background: "#fff",
+              color: C.muted,
+              border: `1px solid ${C.line}`,
+              fontFamily: BODY,
+              fontWeight: 500,
+              fontSize: 10.5,
+              textTransform: "uppercase",
+              letterSpacing: "0.12em",
+              textAlign: "center",
+              cursor: "pointer",
+            }}
+          >
+            Importer une sauvegarde
+            <input type="file" accept="application/json,.json" onChange={doImportFile} style={{ display: "none" }} />
+          </label>
+          {importMsg && (
+            <p style={{ fontFamily: BODY, fontSize: 10.5, color: importMsg.includes("✓") ? C.b : C.a, margin: "8px 0 0", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {importMsg}
+            </p>
+          )}
+        </div>
 
         <div style={{ borderTop: `1px solid ${C.line}`, marginTop: 26, paddingTop: 18 }}>
           {!confirmReset ? (
